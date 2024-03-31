@@ -20,14 +20,12 @@ void print_directories(const char* dir_name) {
         strcat(next_dir_name, dir_name);
         strcat(next_dir_name, "/");
         strcat(next_dir_name, file->d_name);
-        strcat(next_dir_name, "\0");
         printf("%s\n", next_dir_name);
-        struct stat* buf;
-        if (stat(next_dir_name, buf) != 0) {
-            printf("Oh dear, something went wrong with read()! %s\n", strerror(errno));
-            exit(2); 
+        struct stat buf;
+        if (stat(next_dir_name, &buf) != 0) {
+            exit(1); 
         }
-        if(S_ISDIR(buf->st_mode) && strcmp(file->d_name, ".") != 0 && strcmp(file->d_name, "..") != 0) {
+        if(S_ISDIR(buf.st_mode) && strcmp(file->d_name, ".") != 0 && strcmp(file->d_name, "..") != 0) {
             print_directories(next_dir_name);
         }
     }
