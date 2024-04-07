@@ -12,52 +12,78 @@ int output_file;
 int input_file;
 // sizeof bytes of the path, path, acc_rights, size
 
-void save_file_state(const char* file_name, struct stat* file_stat) {
-    if (!S_ISREG(file_stat->st_mode)) {
-        return;
-    }
-    int len_file_name = strlen(file_name);
-    write(output_file, &len_file_name, sizeof(len_file_name));
-    write(output_file, file_name, len_file_name);
-    write(output_file, &(file_stat->st_mode), sizeof(file_stat->st_mode));
-    write(output_file, &(file_stat->st_size), sizeof(file_stat->st_size));
-    write(output_file, &(file_stat->st_ino), sizeof(file_stat->st_ino));
+typedef struct file_state{
+    char name[1024];
+    unsigned int name_length;
+    time_t mod_time;
+    mode_t acc_rights;
+    off_t size;
+    ino_t ino_id;
+} file_state_t;
+
+void print_file_data(file_state_t* file_data) {
+    printf("file name length: %d\n", file_data->name_length);
+    printf("file name: %s\n", file_data->name);
+    printf("last time modified: %ld\n", file_data->mod_time);
+    printf("acc_rights: %x\n", file_data->acc_rights);
+    printf("size: %ldb\n", file_data->size);
+    printf("inode_id: %ld\n", file_data->ino_id);
 }
 
-int read_file_state() {
-    int number = 0;
-    read(input_file, &number, sizeof(int));
-    if(number >= 1024){
+void create_state_from_stat(const char* file_name, struct stat* file_stat, file_state_t* state) {
+    state->name_length = strlen(file_name);
+    strcpy(state->name, file_name);
+    state->mod_time = file_stat->st_mtime;
+    state->acc_rights = file_stat->st_mode;
+    state->size = file_stat->st_size;
+    state->ino_id = file_stat->st_ino;
+}
+
+void save_file_state(file_state_t* state) {
+    if (!S_ISREG(state->acc_rights)) {
+        return;
+    }
+    write(output_file, &state->name_length, sizeof(state->name_length));
+    write(output_file, &state->name, state->name_length);
+    write(output_file, &(state->mod_time), sizeof(state->mod_time));
+    write(output_file, &(state->acc_rights), sizeof(state->acc_rights));
+    write(output_file, &(state->size), sizeof(state->size));
+    write(output_file, &(state->ino_id), sizeof(state->ino_id));
+}
+
+int read_file_state(file_state_t* file_data) {
+    file_data->name_length = 0;
+    read(input_file, &file_data->name_length, sizeof(file_data->name_length));
+    if(file_data->name_length >= 1024){
         printf("[error] Something wrong with the read number, might smash the stack\n");
         return 1;
     }
-    if (number == 0) {
+    if (file_data->name_length == 0) {
         return 1;
     }
-    printf("number: %d\n", number);
     char buf[1024] = "\0";
-    read(input_file, &buf, number);
-    printf("dir: %s\n", buf);
-    mode_t acc_right;
-    read(input_file, &acc_right, 4);
-    printf("acc_rights: %x\n", acc_right);
-    off_t file_size;
-    read(input_file, &file_size, sizeof(file_size));
-    printf("size: %ldb\n", file_size);
-    ino_t inode_id;
-    read(input_file, &inode_id, sizeof(inode_id));
-    printf("inode_id: %ld\n", inode_id);
-    printf("%ld %d %ld %ld %ld\n", sizeof(int), number, sizeof(acc_right), sizeof(file_size), sizeof(inode_id));
+    read(input_file, &buf, file_data->name_length);
+    strcpy(file_data->name, buf);
+    read(input_file, &file_data->mod_time, sizeof(file_data->mod_time));
+    read(input_file, &file_data->acc_rights, sizeof(file_data->acc_rights));
+    read(input_file, &file_data->size, sizeof(file_data->size));
+    read(input_file, &file_data->ino_id, sizeof(file_data->ino_id));
+    print_file_data(file_data);
     return 0;
 }
 
-void create_snapshot(const char* dir_name) {
+void create_snapshot(char* dir_name) {
+    if (dir_name == NULL || dir_name[0] == '\0') {
+        return;
+    }
     DIR* parent = opendir(dir_name);
     struct stat buf;
     if (stat(dir_name, &buf) != 0) {
         exit(1); 
     }
-    save_file_state(dir_name, &buf);
+    file_state_t state;
+    create_state_from_stat(dir_name, &buf, &state);
+    save_file_state(&state);
     if (parent == NULL) {
         return;
     }
@@ -75,31 +101,86 @@ void create_snapshot(const char* dir_name) {
     closedir(parent);
 }
 
-int main(int argc, char** argv) {
-    output_file = open(".files_data", O_WRONLY | O_CREAT, 0777);
+
+void add_files_to_tracking(int argument_count, char* files[]) {
+    output_file = open(".files_data", O_WRONLY | O_TRUNC | O_CREAT, 0777);
     if (output_file == -1) {
         printf("[error] Could not open output file\n");
         exit(1);
     }
-    if (argc == 1) {
-        printf("[error] Not enought arguments\n");
-        close(output_file);
-        exit(1);
-    }
-    int argument_count = argc - 1;
+
     while(argument_count--) {
-        create_snapshot(argv[argument_count + 1]);
+        create_snapshot(files[argument_count]);
     } 
     close(output_file);
+    output_file = 0;
+}
 
+void print_data_from_tracking() {
     input_file = open(".files_data", O_RDONLY, 0777);
     if (input_file == -1) {
         printf("[error] Could not open input file\n");
         close(input_file);
         exit(1);
     }
-    
-    while(read_file_state() == 0);
+    file_state_t* file_data = malloc(sizeof(file_data));
+    while(read_file_state(file_data) == 0);
     close(input_file);
+    input_file = 0;
+    free(file_data);
+}
+
+int print_file_status(file_state_t* file_data) {
+    struct stat current_status;
+    if (stat(file_data->name, &current_status) != 0) {
+        return 0;
+    }
+    if (file_data->size != current_status.st_size) {
+        printf("modified size: %s\n", file_data->name);
+    }
+    if (file_data->acc_rights != current_status.st_mode) {
+        printf("modified mode: %s\n", file_data->name);
+    }
+
+
+    return 0;
+}
+
+void print_status() {
+    input_file = open(".files_data", O_RDONLY, 0777);
+    if (input_file == -1) {
+        printf("[error] Could not open input file\n");
+        close(input_file);
+        exit(1);
+    }
+    file_state_t* file_data = malloc(sizeof(file_data));
+    while(read_file_state(file_data) == 0){
+        print_file_status(file_data);
+    }
+    close(input_file);
+    input_file = 0;
+    free(file_data);
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        printf("[error] Not enought arguments");
+        exit(EXIT_FAILURE);
+    }
+
+    if (strcmp(argv[1], "add") == 0) {
+        add_files_to_tracking(argc - 2, argv + 2);
+    }
+    else if (strcmp(argv[1], "data") == 0) {
+        print_data_from_tracking();
+    }
+    else if (strcmp(argv[1], "status") == 0) {
+        print_status();
+    }
+    else {
+        printf("Unknown command\n");
+    }
+
+
     return 0;
 }
