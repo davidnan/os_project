@@ -68,8 +68,40 @@ int read_file_state(file_state_t* file_data) {
     read(input_file, &file_data->acc_rights, sizeof(file_data->acc_rights));
     read(input_file, &file_data->size, sizeof(file_data->size));
     read(input_file, &file_data->ino_id, sizeof(file_data->ino_id));
-    print_file_data(file_data);
+    // print_file_data(file_data);
     return 0;
+}
+
+void refresh_snapshot(int files_len, char* files[]) {
+    // read all data in last snapshot, whithout adding the files that are added in this snapshot
+    file_state_t all_tracked_file_states[1000];
+    int tracked_file_count = 0;
+    file_state_t state;
+    input_file = open(".files_data", O_RDONLY, 0777);
+    if (input_file == -1) {
+        printf("[error] Could not open input file\n");
+        exit(1);
+
+    }
+
+    while(read_file_state(&state) == 0){
+        for(int i = 0; i < files_len; i++) {
+            if (strcmp(files[i], state.name) != 0) {
+                all_tracked_file_states[tracked_file_count++] = state;
+            }
+        }
+    }
+    close(input_file);
+    input_file = 0;
+    // put the data in the file. The id of the file will remain in memory to add the new tracked files
+    output_file = open(".files_data", O_WRONLY | O_TRUNC | O_CREAT, 0777);
+    if (output_file == -1) {
+        printf("[error] Could not open output file\n");
+        exit(1);
+    }
+    for (int i = 0; i < tracked_file_count; i++) {
+        save_file_state(&all_tracked_file_states[i]);
+    }
 }
 
 void create_snapshot(char* dir_name) {
@@ -103,11 +135,7 @@ void create_snapshot(char* dir_name) {
 
 
 void add_files_to_tracking(int argument_count, char* files[]) {
-    output_file = open(".files_data", O_WRONLY | O_TRUNC | O_CREAT, 0777);
-    if (output_file == -1) {
-        printf("[error] Could not open output file\n");
-        exit(1);
-    }
+    refresh_snapshot(argument_count, files);
 
     while(argument_count--) {
         create_snapshot(files[argument_count]);
@@ -123,11 +151,12 @@ void print_data_from_tracking() {
         close(input_file);
         exit(1);
     }
-    file_state_t* file_data = malloc(sizeof(file_data));
-    while(read_file_state(file_data) == 0);
+    file_state_t file_data;
+    while(read_file_state(&file_data) == 0) {
+        print_file_data(&file_data);
+    }
     close(input_file);
     input_file = 0;
-    free(file_data);
 }
 
 int print_file_status(file_state_t* file_data) {
@@ -135,11 +164,11 @@ int print_file_status(file_state_t* file_data) {
     if (stat(file_data->name, &current_status) != 0) {
         return 0;
     }
-    if (file_data->size != current_status.st_size) {
-        printf("modified size: %s\n", file_data->name);
+    if (file_data->mod_time != current_status.st_mtime) {
+        printf("modified: %s\n", file_data->name);
     }
     if (file_data->acc_rights != current_status.st_mode) {
-        printf("modified mode: %s\n", file_data->name);
+        printf("modified mode: %s   %x -> %x\n", file_data->name, file_data->acc_rights, current_status.st_mode);
     }
 
 
@@ -153,13 +182,12 @@ void print_status() {
         close(input_file);
         exit(1);
     }
-    file_state_t* file_data = malloc(sizeof(file_data));
-    while(read_file_state(file_data) == 0){
-        print_file_status(file_data);
+    file_state_t file_data;
+    while(read_file_state(&file_data) == 0){
+        print_file_status(&file_data);
     }
     close(input_file);
     input_file = 0;
-    free(file_data);
 }
 
 int main(int argc, char** argv) {
@@ -178,7 +206,7 @@ int main(int argc, char** argv) {
         print_status();
     }
     else {
-        printf("Unknown command\n");
+        printf("Unknown command\nAvailable commands: add [file1 file2 ...], data, status\n");
     }
 
 
