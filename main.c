@@ -78,21 +78,22 @@ void refresh_snapshot(int files_len, char* files[]) {
     int tracked_file_count = 0;
     file_state_t state;
     input_file = open(".files_data", O_RDONLY, 0777);
-    if (input_file == -1) {
-        printf("[error] Could not open input file\n");
-        exit(1);
-
-    }
-
-    while(read_file_state(&state) == 0){
-        for(int i = 0; i < files_len; i++) {
-            if (strcmp(files[i], state.name) != 0) {
-                all_tracked_file_states[tracked_file_count++] = state;
+    if (input_file != -1) {
+        while(read_file_state(&state) == 0){
+            for(int i = 0; i < files_len; i++) {
+                struct stat current_status;
+                if (stat(files[i], &current_status) != 0) {
+                    return;
+                }
+                if (current_status.st_ino != state.ino_id) {
+                    all_tracked_file_states[tracked_file_count++] = state;
+                }
             }
         }
+        close(input_file);
+        input_file = 0;
     }
-    close(input_file);
-    input_file = 0;
+
     // put the data in the file. The id of the file will remain in memory to add the new tracked files
     output_file = open(".files_data", O_WRONLY | O_TRUNC | O_CREAT, 0777);
     if (output_file == -1) {
@@ -137,9 +138,18 @@ void create_snapshot(char* dir_name) {
 void add_files_to_tracking(int argument_count, char* files[]) {
     refresh_snapshot(argument_count, files);
 
-    while(argument_count--) {
-        create_snapshot(files[argument_count]);
-    } 
+    for (int i = 0; i < argument_count; i++) {
+        if(fork()) {
+            sleep(1);
+        }
+        else {
+            create_snapshot(files[argument_count]);
+        }
+    }
+
+    // while(argument_count--) {
+    //     create_snapshot(files[argument_count]);
+    // } 
     close(output_file);
     output_file = 0;
 }
