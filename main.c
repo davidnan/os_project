@@ -76,18 +76,29 @@ void refresh_snapshot(int files_len, char* files[]) {
     // read all data in last snapshot, whithout adding the files that are added in this snapshot
     file_state_t all_tracked_file_states[1000];
     int tracked_file_count = 0;
+    ino_t inode_blacklist[1000]; int blacklisted_cnt = 0;
     file_state_t state;
+    for (int i = 0; i < files_len; i++) {
+        struct stat current_status;
+        if (stat(files[i], &current_status) != 0) {
+            continue;
+        }
+        inode_blacklist[blacklisted_cnt++] = current_status.st_ino;
+    }
+    
+
     input_file = open(".files_data", O_RDONLY, 0777);
     if (input_file != -1) {
         while(read_file_state(&state) == 0){
-            for(int i = 0; i < files_len; i++) {
-                struct stat current_status;
-                if (stat(files[i], &current_status) != 0) {
-                    return;
+            int is_bl = 0;
+            for(int i = 0; i < blacklisted_cnt; i++) {
+                if (state.ino_id == inode_blacklist[i]) {
+                    is_bl = 1;
+                    break;
                 }
-                if (current_status.st_ino != state.ino_id) {
-                    all_tracked_file_states[tracked_file_count++] = state;
-                }
+            }
+            if(is_bl == 0) {
+                all_tracked_file_states[tracked_file_count++] = state;
             }
         }
         close(input_file);
@@ -106,6 +117,7 @@ void refresh_snapshot(int files_len, char* files[]) {
 }
 
 void create_snapshot(char* dir_name) {
+    printf("%s\n", dir_name);
     if (dir_name == NULL || dir_name[0] == '\0') {
         return;
     }
@@ -143,7 +155,9 @@ void add_files_to_tracking(int argument_count, char* files[]) {
             sleep(1);
         }
         else {
-            create_snapshot(files[argument_count]);
+            printf("child process %s\n", files[i]);
+            create_snapshot(files[i]);
+            exit(1);
         }
     }
 
@@ -202,7 +216,7 @@ void print_status() {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        printf("[error] Not enought arguments");
+        printf("[error] Not enought arguments\n");
         exit(EXIT_FAILURE);
     }
 
