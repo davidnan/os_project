@@ -121,7 +121,6 @@ void create_snapshot(char* dir_name) {
     if (dir_name == NULL || dir_name[0] == '\0') {
         return;
     }
-    DIR* parent = opendir(dir_name);
     struct stat buf;
     if (stat(dir_name, &buf) != 0) {
         exit(1); 
@@ -129,6 +128,7 @@ void create_snapshot(char* dir_name) {
     file_state_t state;
     create_state_from_stat(dir_name, &buf, &state);
     save_file_state(&state);
+    DIR* parent = opendir(dir_name);
     if (parent == NULL) {
         return;
     }
@@ -161,9 +161,6 @@ void add_files_to_tracking(int argument_count, char* files[]) {
         }
     }
 
-    // while(argument_count--) {
-    //     create_snapshot(files[argument_count]);
-    // } 
     close(output_file);
     output_file = 0;
 }
@@ -184,17 +181,36 @@ void print_data_from_tracking() {
 }
 
 int print_file_status(file_state_t* file_data) {
+    DIR* parent = opendir(".");
+    if (parent == NULL) {
+        return 1;
+    }
+    int found = 0;
+    struct dirent* file;
+    while((file = readdir(parent)) != NULL) {
+        if(file->d_ino == file_data->ino_id && strcmp(file->d_name, file_data->name) != 0) {
+            found = 1;
+            printf("renamed: %s -> %s\n", file_data->name, file->d_name);
+            break;
+        }
+    }
+    closedir(parent);
+
+    // checking for a file that exists and doesnt have the name changed 
     struct stat current_status;
     if (stat(file_data->name, &current_status) != 0) {
+        if (found == 0) {
+            printf("deleted: %s\n", file_data->name);
+        }
         return 0;
     }
+
     if (file_data->mod_time != current_status.st_mtime) {
         printf("modified: %s\n", file_data->name);
     }
     if (file_data->acc_rights != current_status.st_mode) {
         printf("modified mode: %s   %x -> %x\n", file_data->name, file_data->acc_rights, current_status.st_mode);
     }
-
 
     return 0;
 }
