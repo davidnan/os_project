@@ -127,7 +127,7 @@ void refresh_snapshot(int files_len, char* files[]) {
     }
 }
 
-void create_snapshot(char* dir_name, int* pfd) {
+void create_snapshot(char* dir_name, int* synchronizer_pipe, int* synchronizer_confirm) {
     printf("%s\n", dir_name);
     if (dir_name == NULL || dir_name[0] == '\0') {
         return;
@@ -138,8 +138,10 @@ void create_snapshot(char* dir_name, int* pfd) {
     }
     file_state_t state;
     create_state_from_stat(dir_name, &buf, &state);
-    write_to_file(pfd[1], &state);
-    // write_to_file(output_file, &state);
+    int r;
+    read(synchronizer_pipe[0], &r, sizeof(int));
+    write_to_file(output_file, &state);
+    write(synchronizer_confirm[1], &r, sizeof(int));
     DIR* parent = opendir(dir_name);
     if (parent == NULL) {
         return;
@@ -152,7 +154,7 @@ void create_snapshot(char* dir_name, int* pfd) {
         strcat(next_dir_name, file->d_name);
         printf("%s\n", next_dir_name);
         if(S_ISDIR(buf.st_mode) && strcmp(file->d_name, ".") != 0 && strcmp(file->d_name, "..") != 0) {
-            create_snapshot(next_dir_name, pfd);
+            create_snapshot(next_dir_name, synchronizer_pipe, synchronizer_confirm);
         }
     }
     closedir(parent);
@@ -161,8 +163,13 @@ void create_snapshot(char* dir_name, int* pfd) {
 
 void add_files_to_tracking(int argument_count, char* files[]) {
     refresh_snapshot(argument_count, files);
-    int pfd[2];
-    if (pipe(pfd) < 0) {
+    int synchronizer_pipe[2];
+    int synchronizer_confirm[2];
+    if (pipe(synchronizer_pipe) < 0) {
+        printf("[error] pipe creation failed\n");
+        exit(1);
+    }
+    if (pipe(synchronizer_confirm) < 0) {
         printf("[error] pipe creation failed\n");
         exit(1);
     }
@@ -172,21 +179,19 @@ void add_files_to_tracking(int argument_count, char* files[]) {
             // sleep(1);
         }
         else {
-            printf("child process %s\n", files[i]);
-            close(pfd[0]);
-            create_snapshot(files[i], pfd);
-            close(pfd[1]);
-            printf("Closed pipe for %d pid\n", getpid());
+            close(synchronizer_pipe[1]);
+            close(synchronizer_confirm[0]);
+            create_snapshot(files[i], synchronizer_pipe, synchronizer_confirm);
             exit(1);
         }
     }
-    file_state_t file_data;
-    close(pfd[1]);
-    while(read_file(pfd[0], &file_data) == 0) {
-        print_file_data(&file_data);
+    close(synchronizer_pipe[0]);
+    close(synchronizer_confirm[1]);
+    for(int i = 0; i < argument_count; i++) {
+        int r=1;
+        write(synchronizer_pipe[1], &r, sizeof(int));
+        read(synchronizer_confirm[0], &r, sizeof(int));
     }
-    close(pfd[0]);
-
     close(output_file);
     output_file = 0;
 }
@@ -200,7 +205,8 @@ void print_data_from_tracking() {
     }
     file_state_t file_data;
     while(read_input_file_state(&file_data) == 0) {
-        write_to_file(output_file, &file_data);
+        print_file_data(&file_data);
+        // write_to_file(output_file, &file_data);
     }
     close(input_file);
     input_file = 0;
