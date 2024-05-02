@@ -42,9 +42,6 @@ void create_state_from_stat(const char* file_name, struct stat* file_stat, file_
 }
 
 void write_to_file(int fd, file_state_t* state) {
-    if (!S_ISREG(state->acc_rights)) {
-        return;
-    }
     write(fd, &state->name_length, sizeof(state->name_length));
     write(fd, &state->name, state->name_length);
     write(fd, &(state->mod_time), sizeof(state->mod_time));
@@ -127,8 +124,45 @@ void refresh_snapshot(int files_len, char* files[]) {
     }
 }
 
+int verify_mal(char* dir_name) {
+    int pfd[2];
+    int newfd;
+    if (pipe(pfd) < 0) {
+        perror("Pipe creation failed\n");
+		exit(1);
+    }
+
+    int pid;
+    if ((pid = fork()) < 0) {
+        perror("fork failed\n");
+        exit(1);
+    }
+
+    // parent code
+    if (pid != 0) {
+        close(pfd[1]);
+        char rez;
+        read(pfd[0], &rez, sizeof(char));
+        return rez - '0';
+    }
+
+    // child code
+    if (pid == 0) {
+        if((newfd = dup2(pfd[1], 1)) < 0) {
+            perror("Error when calling dup2\n");
+            exit(1);
+        }
+        close(pfd[0]);  
+        close(pfd[1]);  
+        if(execlp("./verify_mal.sh", "./verify_mal.sh", dir_name, NULL) < 0){
+            char c = '1';
+            write(newfd, &c, sizeof(char));
+        }
+        exit(0);
+    }
+}
+
 void create_snapshot(char* dir_name, int* synchronizer_pipe, int* synchronizer_confirm) {
-    printf("%s\n", dir_name);
     if (dir_name == NULL || dir_name[0] == '\0') {
         return;
     }
@@ -138,6 +172,13 @@ void create_snapshot(char* dir_name, int* synchronizer_pipe, int* synchronizer_c
     }
     file_state_t state;
     create_state_from_stat(dir_name, &buf, &state);
+    if (!S_ISREG(state.acc_rights)) {
+        return;
+    }
+    if(verify_mal(dir_name)) {
+        printf("%s might be malicious, skipped\n", dir_name);
+        return;
+    }
     int r;
     read(synchronizer_pipe[0], &r, sizeof(int));
     write_to_file(output_file, &state);
@@ -166,19 +207,21 @@ void add_files_to_tracking(int argument_count, char* files[]) {
     int synchronizer_pipe[2];
     int synchronizer_confirm[2];
     if (pipe(synchronizer_pipe) < 0) {
-        printf("[error] pipe creation failed\n");
+        perror("Pipe creation failed\n");
         exit(1);
     }
     if (pipe(synchronizer_confirm) < 0) {
-        printf("[error] pipe creation failed\n");
+        perror("Pipe creation failed\n");
         exit(1);
     }
 
     for (int i = 0; i < argument_count; i++) {
-        if(fork()) {
-            // sleep(1);
+        int pid = fork();
+        if (pid < 0) {
+            perror("Fork failed");
+            exit(1);
         }
-        else {
+        if(!pid) {
             close(synchronizer_pipe[1]);
             close(synchronizer_confirm[0]);
             create_snapshot(files[i], synchronizer_pipe, synchronizer_confirm);
@@ -199,14 +242,13 @@ void add_files_to_tracking(int argument_count, char* files[]) {
 void print_data_from_tracking() {
     input_file = open(".files_data", O_RDONLY, 0777);
     if (input_file == -1) {
-        printf("[error] Could not open input file\n");
+        perror("Could not open input file\n");
         close(input_file);
         exit(1);
     }
     file_state_t file_data;
     while(read_input_file_state(&file_data) == 0) {
         print_file_data(&file_data);
-        // write_to_file(output_file, &file_data);
     }
     close(input_file);
     input_file = 0;
@@ -250,7 +292,7 @@ int print_file_status(file_state_t* file_data) {
 void print_status() {
     input_file = open(".files_data", O_RDONLY, 0777);
     if (input_file == -1) {
-        printf("[error] Could not open input file\n");
+        perror("Could not open input file\n");
         close(input_file);
         exit(1);
     }
