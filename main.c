@@ -3,6 +3,7 @@
 #include <sys/types.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -111,7 +112,7 @@ void add_to_blacklist(ino_t* inode_blacklist, int* blacklisted_cnt, char* file_n
 }
 
 void refresh_snapshot(int files_len, char* files[]) {
-    // read all data in last snapshot, whithout adding the files that are added in this snapshot
+    // read all data in last snapshot, without adding the files that are added in this snapshot
     file_state_t all_tracked_file_states[1000];
     int tracked_file_count = 0;
     ino_t inode_blacklist[1000]; int blacklisted_cnt = 0;
@@ -119,7 +120,6 @@ void refresh_snapshot(int files_len, char* files[]) {
     for (int i = 0; i < files_len; i++) {
         add_to_blacklist(inode_blacklist, &blacklisted_cnt, files[i]);
     }
-    
 
     input_file = open(".files_data", O_RDONLY, 0777);
     if (input_file != -1) {
@@ -186,11 +186,12 @@ int verify_mal(char* file_name) {
         }
         exit(0);
     }
+    wait(NULL);
 }
 
 // If file_name represents a directory it checks if it is malicious, then adds it to tracking
 // If file_name represents a directory it iterates throught the subfiles
-void create_snapshot(char* file_name, int* synchronizer_pipe, int* synchronizer_confirm) {
+void create_snapshot(char* file_name, int* pipe_lock, int* pipe_unlock, int* no_of_mal_files) {
     if (file_name == NULL || file_name[0] == '\0') {
         return;
     }
@@ -203,13 +204,24 @@ void create_snapshot(char* file_name, int* synchronizer_pipe, int* synchronizer_
     if (S_ISREG(state.acc_rights)) {
         // code in case of file
         if(verify_mal(file_name)) {
-            printf("%s might be malicious, skipped\n", file_name);
+            (*no_of_mal_files)++;
+            int pid = fork();
+            if (pid < 0) {
+                perror("Pipe creation failed\n");
+                exit(1);
+            }
+            // child code
+            if (pid == 0) {
+                execlp("./mv_q.sh", "./mv_q.sh", file_name, NULL);
+                exit(1);
+            }
+            wait(NULL);
             return;
         }
         int r;
-        read(synchronizer_pipe[0], &r, sizeof(int));
+        read(pipe_lock[0], &r, sizeof(int));
         write_to_file(output_file, &state);
-        write(synchronizer_confirm[1], &r, sizeof(int));
+        write(pipe_unlock[1], &r, sizeof(int));
         return;
     }
     // code in case of directory
@@ -225,7 +237,7 @@ void create_snapshot(char* file_name, int* synchronizer_pipe, int* synchronizer_
         strcat(next_dir_name, file->d_name);
         printf("%s\n", next_dir_name);
         if(S_ISDIR(buf.st_mode) && strcmp(file->d_name, ".") != 0 && strcmp(file->d_name, "..") != 0) {
-            create_snapshot(next_dir_name, synchronizer_pipe, synchronizer_confirm);
+            create_snapshot(next_dir_name, pipe_lock, pipe_unlock, no_of_mal_files);
         }
     }
     closedir(parent);
@@ -234,13 +246,18 @@ void create_snapshot(char* file_name, int* synchronizer_pipe, int* synchronizer_
 
 void add_files_to_tracking(int argument_count, char* files[]) {
     refresh_snapshot(argument_count, files);
-    int synchronizer_pipe[2];
-    int synchronizer_confirm[2];
-    if (pipe(synchronizer_pipe) < 0) {
+    int pipe_lock[2];
+    int pipe_unlock[2];
+    int communication_pipe[2];
+    if (pipe(pipe_lock) < 0) {
         perror("Pipe creation failed\n");
         exit(1);
     }
-    if (pipe(synchronizer_confirm) < 0) {
+    if (pipe(pipe_unlock) < 0) {
+        perror("Pipe creation failed\n");
+        exit(1);
+    }
+    if (pipe(communication_pipe) < 0) {
         perror("Pipe creation failed\n");
         exit(1);
     }
@@ -252,25 +269,58 @@ void add_files_to_tracking(int argument_count, char* files[]) {
             exit(1);
         }
         if(!pid) {
-            close(synchronizer_pipe[1]);
-            close(synchronizer_confirm[0]);
-            create_snapshot(files[i], synchronizer_pipe, synchronizer_confirm);
+            // setting up the synchronization pipes inside the child process
+            int r = 1;
+            close(pipe_lock[1]);
+            close(pipe_unlock[0]);
+
+            close(communication_pipe[0]);
+
+            int pid = getpid();
+            int no_of_mal_files = 0;
+            create_snapshot(files[i], pipe_lock, pipe_unlock, &no_of_mal_files);
+
+            r = 2;
+            // locking
+            read(pipe_lock[0], &r, sizeof(int));
+            // writing
+            write(communication_pipe[1], &pid, sizeof(pid));
+            write(communication_pipe[1], &no_of_mal_files, sizeof(no_of_mal_files));
+            // unlocking
+            write(pipe_unlock[1], &r, sizeof(int));
+
+            close(pipe_lock[0]);
+            close(pipe_unlock[1]);
+            close(communication_pipe[1]);
             exit(1);
         }
     }
-    close(synchronizer_pipe[0]);
-    close(synchronizer_confirm[1]);
+    close(pipe_lock[0]);
+    close(pipe_unlock[1]);
+    close(communication_pipe[1]);
     int r=1;
-    int sync_times = 0;
-    write(synchronizer_pipe[1], &r, sizeof(int));
-    while(read(synchronizer_confirm[0], &r, sizeof(int))) {
-        write(synchronizer_pipe[1], &r, sizeof(int));
-        sync_times++;
+    write(pipe_lock[1], &r, sizeof(int));
+    while(read(pipe_unlock[0], &r, sizeof(int))) {
+        if (r == 2) {
+        }
+        write(pipe_lock[1], &r, sizeof(int));
     }
-    printf("synced %d times\n", sync_times);
-    
+
+    int child_pid;
+    int no_of_mal_files;
+    while(read(communication_pipe[0], &child_pid, sizeof(child_pid))) {
+        read(communication_pipe[0], &no_of_mal_files, sizeof(no_of_mal_files));
+        printf("Child process %d having pid: %d had %d suspect files\n", child_pid - getpid(), child_pid, no_of_mal_files);
+    }
+    close(pipe_lock[1]);
+    close(pipe_lock[0]);
+    close(communication_pipe[0]);
+
     close(output_file);
     output_file = 0;
+    int st = 0;
+    int wpid;
+    while ((wpid = wait(&st)) > 0);
 }
 
 void print_data_from_tracking() {
