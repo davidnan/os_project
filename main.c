@@ -80,6 +80,36 @@ int read_input_file_state(file_state_t* file_data) {
     return read_file(input_file, file_data);
 }
 
+void add_to_blacklist(ino_t* inode_blacklist, int* blacklisted_cnt, char* file_name) {
+    struct stat current_status;
+    if (stat(file_name, &current_status) != 0) {
+        exit(1);
+    }
+
+    if (S_ISREG(current_status.st_mode)) {
+        // code in case of file
+        inode_blacklist[(*blacklisted_cnt)++] = current_status.st_ino;
+        return;
+    }
+    // code in case of directory
+    DIR* parent = opendir(file_name);
+    if (parent == NULL) {
+        return;
+    }
+    struct dirent* file;
+    while((file = readdir(parent)) != NULL) {
+        char next_dir_name[1024] = "\0";
+        strcat(next_dir_name, file_name);
+        strcat(next_dir_name, "/");
+        strcat(next_dir_name, file->d_name);
+        if(S_ISDIR(current_status.st_mode) && strcmp(file->d_name, ".") != 0 && strcmp(file->d_name, "..") != 0) {
+            add_to_blacklist(inode_blacklist, blacklisted_cnt, next_dir_name);
+        }
+    }
+    closedir(parent);
+
+}
+
 void refresh_snapshot(int files_len, char* files[]) {
     // read all data in last snapshot, whithout adding the files that are added in this snapshot
     file_state_t all_tracked_file_states[1000];
@@ -87,11 +117,7 @@ void refresh_snapshot(int files_len, char* files[]) {
     ino_t inode_blacklist[1000]; int blacklisted_cnt = 0;
     file_state_t state;
     for (int i = 0; i < files_len; i++) {
-        struct stat current_status;
-        if (stat(files[i], &current_status) != 0) {
-            continue;
-        }
-        inode_blacklist[blacklisted_cnt++] = current_status.st_ino;
+        add_to_blacklist(inode_blacklist, &blacklisted_cnt, files[i]);
     }
     
 
@@ -124,7 +150,7 @@ void refresh_snapshot(int files_len, char* files[]) {
     }
 }
 
-int verify_mal(char* dir_name) {
+int verify_mal(char* file_name) {
     int pfd[2];
     int newfd;
     if (pipe(pfd) < 0) {
@@ -154,7 +180,7 @@ int verify_mal(char* dir_name) {
         }
         close(pfd[0]);  
         close(pfd[1]);  
-        if(execlp("./verify_mal.sh", "./verify_mal.sh", dir_name, NULL) < 0){
+        if(execlp("./verify_mal.sh", "./verify_mal.sh", file_name, NULL) < 0){
             char c = '1';
             write(newfd, &c, sizeof(char));
         }
@@ -162,35 +188,39 @@ int verify_mal(char* dir_name) {
     }
 }
 
-void create_snapshot(char* dir_name, int* synchronizer_pipe, int* synchronizer_confirm) {
-    if (dir_name == NULL || dir_name[0] == '\0') {
+// If file_name represents a directory it checks if it is malicious, then adds it to tracking
+// If file_name represents a directory it iterates throught the subfiles
+void create_snapshot(char* file_name, int* synchronizer_pipe, int* synchronizer_confirm) {
+    if (file_name == NULL || file_name[0] == '\0') {
         return;
     }
     struct stat buf;
-    if (stat(dir_name, &buf) != 0) {
+    if (stat(file_name, &buf) != 0) {
         exit(1); 
     }
     file_state_t state;
-    create_state_from_stat(dir_name, &buf, &state);
-    if (!S_ISREG(state.acc_rights)) {
+    create_state_from_stat(file_name, &buf, &state);
+    if (S_ISREG(state.acc_rights)) {
+        // code in case of file
+        if(verify_mal(file_name)) {
+            printf("%s might be malicious, skipped\n", file_name);
+            return;
+        }
+        int r;
+        read(synchronizer_pipe[0], &r, sizeof(int));
+        write_to_file(output_file, &state);
+        write(synchronizer_confirm[1], &r, sizeof(int));
         return;
     }
-    if(verify_mal(dir_name)) {
-        printf("%s might be malicious, skipped\n", dir_name);
-        return;
-    }
-    int r;
-    read(synchronizer_pipe[0], &r, sizeof(int));
-    write_to_file(output_file, &state);
-    write(synchronizer_confirm[1], &r, sizeof(int));
-    DIR* parent = opendir(dir_name);
+    // code in case of directory
+    DIR* parent = opendir(file_name);
     if (parent == NULL) {
         return;
     }
     struct dirent* file;
     while((file = readdir(parent)) != NULL) {
         char next_dir_name[1024] = "\0";
-        strcat(next_dir_name, dir_name);
+        strcat(next_dir_name, file_name);
         strcat(next_dir_name, "/");
         strcat(next_dir_name, file->d_name);
         printf("%s\n", next_dir_name);
@@ -230,11 +260,15 @@ void add_files_to_tracking(int argument_count, char* files[]) {
     }
     close(synchronizer_pipe[0]);
     close(synchronizer_confirm[1]);
-    for(int i = 0; i < argument_count; i++) {
-        int r=1;
+    int r=1;
+    int sync_times = 0;
+    write(synchronizer_pipe[1], &r, sizeof(int));
+    while(read(synchronizer_confirm[0], &r, sizeof(int))) {
         write(synchronizer_pipe[1], &r, sizeof(int));
-        read(synchronizer_confirm[0], &r, sizeof(int));
+        sync_times++;
     }
+    printf("synced %d times\n", sync_times);
+    
     close(output_file);
     output_file = 0;
 }
